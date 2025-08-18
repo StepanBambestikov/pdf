@@ -10,7 +10,7 @@ Features
 
 ## Install:
 
-`go get -u github.com/dslipak/pdf`
+`go get -u github.com/makgig/pdf`
 
 
 ## Read plain text
@@ -22,7 +22,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/dslipak/pdf"
+	"github.com/makgig/pdf"
 )
 
 func main() {
@@ -94,7 +94,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/dslipak/pdf"
+	"github.com/makgig/pdf"
 )
 
 func main() {
