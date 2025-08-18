@@ -6,6 +6,7 @@ package pdf
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -684,6 +685,115 @@ func (p Page) GetTextByRow() (Rows, error) {
 	return result, err
 }
 
+// GetTextByRow returns the page's all text grouped by rows with context support.
+func (p Page) GetTextByRowCtx(ctx context.Context) (Rows, error) {
+	result := Rows{}
+	var err error
+
+	defer func() {
+		if r := recover(); r != nil {
+			// если паниковали context.Canceled/DeadlineExceeded — вернём ровно эту ошибку
+			switch e := r.(type) {
+			case error:
+				err = e
+			default:
+				err = fmt.Errorf("%v", r)
+			}
+			result = Rows{}
+		}
+	}()
+
+	// быстрый отказ, если ctx уже отменён/истёк
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	showText := func(enc TextEncoding, currentX, currentY float64, s string) {
+		// проверяем отмену до любой работы
+		if err := ctx.Err(); err != nil {
+			panic(err)
+		}
+
+		var textBuilder bytes.Buffer
+		for i, ch := range enc.Decode(s) {
+			// периодически проверяем контекст, чтобы не тормозить
+			if i%256 == 0 {
+				if err := ctx.Err(); err != nil {
+					panic(err)
+				}
+			}
+			if _, werr := textBuilder.WriteRune(ch); werr != nil {
+				panic(werr)
+			}
+		}
+
+		text := Text{
+			S: textBuilder.String(),
+			X: currentX,
+			Y: currentY,
+		}
+
+		// поиск строки с тем же Y; тоже изредка проверяем ctx
+		var currentRow *Row
+		rowFound := false
+		for i, row := range result {
+			if i%64 == 0 {
+				if err := ctx.Err(); err != nil {
+					panic(err)
+				}
+			}
+			if int64(currentY) == row.Position {
+				currentRow = row
+				rowFound = true
+				break
+			}
+		}
+
+		if !rowFound {
+			currentRow = &Row{
+				Position: int64(currentY),
+				Content:  TextHorizontal{},
+			}
+			result = append(result, currentRow)
+		}
+
+		currentRow.Content = append(currentRow.Content, text)
+	}
+
+	// сам обход текста
+	p.walkTextBlocks(showText)
+
+	// перед сортировками — ещё одна проверка
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// сортировка контента в строках с периодической проверкой
+	for i, row := range result {
+		if i%32 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		sort.Sort(row.Content)
+	}
+
+	// итоговая сортировка строк по позиции сверху-вниз
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(result, func(i, j int) bool {
+		// компаратор вызывается очень часто — проверки ctx здесь не делаем
+		return result[i].Position > result[j].Position
+	})
+
+	// финальный чек
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return result, err
+}
+
 func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s string)) {
 	strm := p.V.Key("Contents")
 
@@ -752,18 +862,18 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 		}
 	})
 }
-//
+
 // Content returns the page's content.
 //
-// bugfix: 
+// bugfix:
+//
 //	the /Content may contain an array of refs
 //	this leads to an endless loop
-//
 func (p Page) Content() Content {
-	
+
 	var text []Text
 	var rect []Rect
-	
+
 	//fmt.Println("page=",p)
 	strm := p.V.Key("Contents")
 
@@ -779,7 +889,7 @@ func (p Page) Content() Content {
 			c := p.readContent(strmindex)
 			text = append(text, c.Text...)
 			rect = append(rect, c.Rect...)
-		}	
+		}
 	}
 	return Content{text, rect}
 }
@@ -791,7 +901,7 @@ func (p Page) readContent(strm Value) Content {
 		Th:  1,
 		CTM: ident,
 	}
-	
+
 	var text []Text
 	showText := func(s string) {
 		n := 0
@@ -872,7 +982,7 @@ func (p Page) readContent(strm Value) Content {
 
 		case "Q": // restore graphics state
 			n := len(gstack) - 1
-			if n >= 0 {	// bugfix: don't raise an exception
+			if n >= 0 { // bugfix: don't raise an exception
 				g = gstack[n]
 				gstack = gstack[:n]
 			}
@@ -944,7 +1054,7 @@ func (p Page) readContent(strm Value) Content {
 			showText(args[0].RawString())
 
 		case "TJ": // show text, allowing individual glyph positioning
-			if len(args) > 0 {	// bugfix: don't raise an exception
+			if len(args) > 0 { // bugfix: don't raise an exception
 				v := args[0]
 				for i := 0; i < v.Len(); i++ {
 					x := v.Index(i)
