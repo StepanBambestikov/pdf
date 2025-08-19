@@ -110,19 +110,28 @@ func (b *buffer) errorf(format string, args ...interface{}) string {
 func (b *buffer) reload() (bool, error) {
 	n := cap(b.buf) - int(b.offset%int64(cap(b.buf)))
 	n, err := b.r.Read(b.buf[:n])
+
 	if n == 0 && err != nil {
 		b.buf = b.buf[:0]
 		b.pos = 0
 		if b.allowEOF && err == io.EOF {
 			b.eof = true
-			return false, nil // ← Изменено: nil вместо err
+			return false, nil
 		}
-		//fmt.Sprint(b.errorf("malformed PDF: reading at offset %d: %v", b.offset, err))
 		return false, err
 	}
+
+	// Данные прочитаны успешно
 	b.offset += int64(n)
 	b.buf = b.buf[:n]
 	b.pos = 0
+
+	// Обрабатываем EOF после успешного чтения
+	if err == io.EOF {
+		b.eof = true
+		return true, nil // ← Данные есть, EOF не ошибка
+	}
+
 	return true, err
 }
 
