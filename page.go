@@ -809,7 +809,7 @@ func (p Page) walkTextBlocksCtx(ctx context.Context, walker func(enc TextEncodin
 	// Счетчик операций для периодической проверки контекста
 	operationCount := 0
 
-	Interpret(strm, func(stk *Stack, op string) {
+	InterpretCtx(ctx, strm, func(stk *Stack, op string) {
 		// Проверяем контекст каждые 1000 операций чтобы не тормозить
 		operationCount++
 		if operationCount%1000 == 0 {

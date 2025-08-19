@@ -5,6 +5,7 @@
 package pdf
 
 import (
+	"context"
 	"fmt"
 	"io"
 )
@@ -50,7 +51,6 @@ func newDict() Value {
 // points to Unicode code points.
 //
 // There is no support for executable blocks, among other limitations.
-//
 func Interpret(strm Value, do func(stk *Stack, op string)) {
 	rd := strm.Reader()
 	b := newBuffer(rd, 0)
@@ -125,6 +125,93 @@ Reading:
 		}
 		stk.Push(Value{nil, objptr{}, obj})
 	}
+}
+
+func InterpretCtx(ctx context.Context, strm Value, do func(stk *Stack, op string)) error {
+	rd := strm.Reader()
+	b := newBuffer(rd, 0)
+	b.allowEOF = true
+	b.allowObjptr = false
+	b.allowStream = false
+	var stk Stack
+	var dicts []dict
+
+	operationCount := 0
+
+Reading:
+	for {
+		// Проверяем контекст каждые 1000 операций
+		operationCount++
+		if operationCount%1000 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+
+		tok := b.readToken()
+		if tok == io.EOF {
+			break
+		}
+		if kw, ok := tok.(keyword); ok {
+			switch kw {
+			case "null", "[", "]", "<<", ">>":
+				break
+			default:
+				for i := len(dicts) - 1; i >= 0; i-- {
+					if v, ok := dicts[i][name(kw)]; ok {
+						stk.Push(Value{nil, objptr{}, v})
+						continue Reading
+					}
+				}
+				do(&stk, string(kw))
+				continue
+			case "dict":
+				stk.Pop()
+				stk.Push(Value{nil, objptr{}, make(dict)})
+				continue
+			case "currentdict":
+				if len(dicts) == 0 {
+					return fmt.Errorf("no current dictionary")
+				}
+				stk.Push(Value{nil, objptr{}, dicts[len(dicts)-1]})
+				continue
+			case "begin":
+				d := stk.Pop()
+				if d.Kind() != Dict {
+					return fmt.Errorf("cannot begin non-dict")
+				}
+				dicts = append(dicts, d.data.(dict))
+				continue
+			case "end":
+				if len(dicts) <= 0 {
+					return fmt.Errorf("mismatched begin/end")
+				}
+				dicts = dicts[:len(dicts)-1]
+				continue
+			case "def":
+				if len(dicts) <= 0 {
+					return fmt.Errorf("def without open dict")
+				}
+				val := stk.Pop()
+				key, ok := stk.Pop().data.(name)
+				if !ok {
+					return fmt.Errorf("def of non-name")
+				}
+				dicts[len(dicts)-1][key] = val.data
+				continue
+			case "pop":
+				stk.Pop()
+				continue
+			}
+		}
+		b.unreadToken(tok)
+		obj, err := b.readObject()
+		if err != nil {
+			return err
+		}
+		stk.Push(Value{nil, objptr{}, obj})
+	}
+	return nil
 }
 
 type seqReader struct {
