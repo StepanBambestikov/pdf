@@ -708,7 +708,7 @@ func (p Page) GetTextByRowCtx(ctx context.Context) (Rows, error) {
 		return nil, err
 	}
 
-	showText := func(enc TextEncoding, currentX, currentY float64, s string) {
+	showText := func(ctx context.Context, enc TextEncoding, currentX, currentY float64, s string) {
 		// проверяем отмену до любой работы
 		if err := ctx.Err(); err != nil {
 			panic(err)
@@ -794,7 +794,7 @@ func (p Page) GetTextByRowCtx(ctx context.Context) (Rows, error) {
 	return result, err
 }
 
-func (p Page) walkTextBlocksCtx(ctx context.Context, walker func(enc TextEncoding, x, y float64, s string)) error {
+func (p Page) walkTextBlocksCtx(ctx context.Context, walker func(ctx context.Context, enc TextEncoding, x, y float64, s string)) error {
 	strm := p.V.Key("Contents")
 
 	fonts := make(map[string]*Font)
@@ -848,7 +848,7 @@ func (p Page) walkTextBlocksCtx(ctx context.Context, walker func(enc TextEncodin
 				panic("bad Tj operator")
 			}
 
-			walker(enc, currentX, currentY, args[0].RawString())
+			walker(ctx, enc, currentX, currentY, args[0].RawString())
 		case "TJ": // show text, allowing individual glyph positioning
 			v := args[0]
 			for i := 0; i < v.Len(); i++ {
@@ -860,11 +860,11 @@ func (p Page) walkTextBlocksCtx(ctx context.Context, walker func(enc TextEncodin
 				}
 				x := v.Index(i)
 				if x.Kind() == String {
-					walker(enc, currentX, currentY, x.RawString())
+					walker(ctx, enc, currentX, currentY, x.RawString())
 				}
 			}
 		case "Td":
-			walker(enc, currentX, currentY, "")
+			walker(ctx, enc, currentX, currentY, "")
 		case "Tm":
 			currentX = args[4].Float64()
 			currentY = args[5].Float64()
