@@ -127,6 +127,7 @@ Reading:
 	}
 }
 
+// InterpretCtx interprets the content in a stream as a basic PostScript program with context support
 func InterpretCtx(ctx context.Context, strm Value, do func(stk *Stack, op string)) error {
 	rd := strm.Reader()
 	b := newBuffer(rd, 0)
@@ -136,19 +137,17 @@ func InterpretCtx(ctx context.Context, strm Value, do func(stk *Stack, op string
 	var stk Stack
 	var dicts []dict
 
-	operationCount := 0
-
 Reading:
 	for {
-		// Проверяем контекст каждые 1000 операций
-		operationCount++
-		if operationCount%1000 == 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
+		// Проверяем контекст перед каждой операцией
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
-		tok := b.readToken()
+		tok, err := b.readTokenCtx(ctx)
+		if err != nil {
+			return err
+		}
 		if tok == io.EOF {
 			break
 		}
@@ -205,7 +204,7 @@ Reading:
 			}
 		}
 		b.unreadToken(tok)
-		obj, err := b.readObject()
+		obj, err := b.readObjectCtx(ctx)
 		if err != nil {
 			return err
 		}

@@ -7,6 +7,7 @@
 package pdf
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,7 @@ func (b *buffer) seek(offset int64) {
 	b.unread = b.unread[:0]
 }
 
+// Старая версия readByte для обратной совместимости
 func (b *buffer) readByte() byte {
 	if b.pos >= len(b.buf) {
 		b.reload()
@@ -76,6 +78,28 @@ func (b *buffer) readByte() byte {
 	c := b.buf[b.pos]
 	b.pos++
 	return c
+}
+
+// Новая версия readByte с поддержкой контекста
+func (b *buffer) readByteCtx(ctx context.Context) (byte, error) {
+	if b.pos >= len(b.buf) {
+		// Проверяем контекст перед reload
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+
+		_, err := b.reload()
+		if err != nil {
+			return 0, err
+		}
+
+		if b.pos >= len(b.buf) {
+			return '\n', nil
+		}
+	}
+	c := b.buf[b.pos]
+	b.pos++
+	return c, nil
 }
 
 func (b *buffer) errorf(format string, args ...interface{}) string {
@@ -130,6 +154,7 @@ func (b *buffer) unreadToken(t token) {
 	b.unread = append(b.unread, t)
 }
 
+// Старая версия readToken для обратной совместимости
 func (b *buffer) readToken() token {
 	if n := len(b.unread); n > 0 {
 		t := b.unread[n-1]
@@ -189,6 +214,82 @@ func (b *buffer) readToken() token {
 	}
 }
 
+// Новая версия readToken с поддержкой контекста
+func (b *buffer) readTokenCtx(ctx context.Context) (token, error) {
+	if n := len(b.unread); n > 0 {
+		t := b.unread[n-1]
+		b.unread = b.unread[:n-1]
+		return t, nil
+	}
+
+	// Find first non-space, non-comment byte.
+	c, err := b.readByteCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		if isSpace(c) {
+			if b.eof {
+				return io.EOF, nil
+			}
+			c, err = b.readByteCtx(ctx)
+			if err != nil {
+				return nil, err
+			}
+		} else if c == '%' {
+			for c != '\r' && c != '\n' {
+				c, err = b.readByteCtx(ctx)
+				if err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			break
+		}
+	}
+
+	switch c {
+	case '<':
+		c2, err := b.readByteCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if c2 == '<' {
+			return keyword("<<"), nil
+		}
+		b.unreadByte()
+		return b.readHexStringCtx(ctx)
+
+	case '(':
+		return b.readLiteralStringCtx(ctx)
+
+	case '[', ']', '{', '}':
+		return keyword(c), nil
+
+	case '/':
+		return b.readNameCtx(ctx)
+
+	case '>':
+		c2, err := b.readByteCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if c2 == '>' {
+			return keyword(">>"), nil
+		}
+		b.unreadByte()
+		fallthrough
+
+	default:
+		if isDelim(c) {
+			return b.errorf("unexpected delimiter %#q", rune(c)), nil
+		}
+		b.unreadByte()
+		return b.readKeywordCtx(ctx)
+	}
+}
+
 func (b *buffer) readHexString() token {
 	tmp := b.tmp[:0]
 	for {
@@ -214,6 +315,39 @@ func (b *buffer) readHexString() token {
 	}
 	b.tmp = tmp
 	return string(tmp)
+}
+
+func (b *buffer) readHexStringCtx(ctx context.Context) (token, error) {
+	tmp := b.tmp[:0]
+	for {
+	Loop:
+		c, err := b.readByteCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if c == '>' {
+			break
+		}
+		if isSpace(c) {
+			goto Loop
+		}
+	Loop2:
+		c2, err := b.readByteCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if isSpace(c2) {
+			goto Loop2
+		}
+		x := unhex(c)<<4 | unhex(c2)
+		if x < 0 {
+			fmt.Sprint(b.errorf("malformed hex string %c %c %s", c, c2, b.buf[b.pos:]))
+			break
+		}
+		tmp = append(tmp, byte(x))
+	}
+	b.tmp = tmp
+	return string(tmp), nil
 }
 
 func unhex(b byte) int {
@@ -291,6 +425,82 @@ Loop:
 	return string(tmp)
 }
 
+func (b *buffer) readLiteralStringCtx(ctx context.Context) (token, error) {
+	tmp := b.tmp[:0]
+	depth := 1
+Loop:
+	for {
+		c, err := b.readByteCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		switch c {
+		default:
+			tmp = append(tmp, c)
+		case '(':
+			depth++
+			tmp = append(tmp, c)
+		case ')':
+			if depth--; depth == 0 {
+				break Loop
+			}
+			tmp = append(tmp, c)
+		case '\\':
+			c, err = b.readByteCtx(ctx)
+			if err != nil {
+				return nil, err
+			}
+			switch c {
+			default:
+				fmt.Sprint(b.errorf("invalid escape sequence \\%c", c))
+				tmp = append(tmp, '\\', c)
+			case 'n':
+				tmp = append(tmp, '\n')
+			case 'r':
+				tmp = append(tmp, '\r')
+			case 'b':
+				tmp = append(tmp, '\b')
+			case 't':
+				tmp = append(tmp, '\t')
+			case 'f':
+				tmp = append(tmp, '\f')
+			case '(', ')', '\\':
+				tmp = append(tmp, c)
+			case '\r':
+				c2, err := b.readByteCtx(ctx)
+				if err != nil {
+					return nil, err
+				}
+				if c2 != '\n' {
+					b.unreadByte()
+				}
+				fallthrough
+			case '\n':
+				// no append
+			case '0', '1', '2', '3', '4', '5', '6', '7':
+				x := int(c - '0')
+				for i := 0; i < 2; i++ {
+					c, err = b.readByteCtx(ctx)
+					if err != nil {
+						return nil, err
+					}
+					if c < '0' || c > '7' {
+						b.unreadByte()
+						break
+					}
+					x = x*8 + int(c-'0')
+				}
+				if x > 255 {
+					b.errorf("invalid octal escape \\%03o", x)
+				}
+				tmp = append(tmp, byte(x))
+			}
+		}
+	}
+	b.tmp = tmp
+	return string(tmp), nil
+}
+
 func (b *buffer) readName() token {
 	tmp := b.tmp[:0]
 	for {
@@ -312,6 +522,39 @@ func (b *buffer) readName() token {
 	}
 	b.tmp = tmp
 	return name(string(tmp))
+}
+
+func (b *buffer) readNameCtx(ctx context.Context) (token, error) {
+	tmp := b.tmp[:0]
+	for {
+		c, err := b.readByteCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if isDelim(c) || isSpace(c) {
+			b.unreadByte()
+			break
+		}
+		if c == '#' {
+			c1, err := b.readByteCtx(ctx)
+			if err != nil {
+				return nil, err
+			}
+			c2, err := b.readByteCtx(ctx)
+			if err != nil {
+				return nil, err
+			}
+			x := unhex(c1)<<4 | unhex(c2)
+			if x < 0 {
+				fmt.Sprint(b.errorf("malformed name"))
+			}
+			tmp = append(tmp, byte(x))
+			continue
+		}
+		tmp = append(tmp, c)
+	}
+	b.tmp = tmp
+	return name(string(tmp)), nil
 }
 
 func (b *buffer) readKeyword() token {
@@ -347,6 +590,42 @@ func (b *buffer) readKeyword() token {
 		return x
 	}
 	return keyword(string(tmp))
+}
+
+func (b *buffer) readKeywordCtx(ctx context.Context) (token, error) {
+	tmp := b.tmp[:0]
+	for {
+		c, err := b.readByteCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if isDelim(c) || isSpace(c) {
+			b.unreadByte()
+			break
+		}
+		tmp = append(tmp, c)
+	}
+	b.tmp = tmp
+	s := string(tmp)
+	switch {
+	case s == "true":
+		return true, nil
+	case s == "false":
+		return false, nil
+	case isInteger(s):
+		x, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			fmt.Sprint(b.errorf("invalid integer %s", s))
+		}
+		return x, nil
+	case isReal(s):
+		x, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			fmt.Sprint(b.errorf("invalid real %s", s))
+		}
+		return x, nil
+	}
+	return keyword(string(tmp)), nil
 }
 
 func isInteger(s string) bool {
@@ -476,6 +755,72 @@ func (b *buffer) readObject() (object, error) {
 	return tok, nil
 }
 
+func (b *buffer) readObjectCtx(ctx context.Context) (object, error) {
+	tok, err := b.readTokenCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if kw, ok := tok.(keyword); ok {
+		switch kw {
+		case "null":
+			return nil, nil
+		case "<<":
+			return b.readDictCtx(ctx)
+		case "[":
+			return b.readArrayCtx(ctx)
+		}
+		return nil, errors.New(b.errorf("unexpected keyword %q parsing object", kw))
+	}
+
+	if str, ok := tok.(string); ok && b.key != nil && b.objptr.id != 0 {
+		tok = decryptString(b.key, b.useAES, b.objptr, str)
+	}
+
+	if !b.allowObjptr {
+		return tok, nil
+	}
+
+	if t1, ok := tok.(int64); ok && int64(uint32(t1)) == t1 {
+		tok2, err := b.readTokenCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if t2, ok := tok2.(int64); ok && int64(uint16(t2)) == t2 {
+			tok3, err := b.readTokenCtx(ctx)
+			if err != nil {
+				return nil, err
+			}
+			switch tok3 {
+			case keyword("R"):
+				return objptr{uint32(t1), uint16(t2)}, nil
+			case keyword("obj"):
+				old := b.objptr
+				b.objptr = objptr{uint32(t1), uint16(t2)}
+				obj, err := b.readObjectCtx(ctx)
+				if err != nil {
+					return nil, err
+				}
+				if _, ok := obj.(stream); !ok {
+					tok4, err := b.readTokenCtx(ctx)
+					if err != nil {
+						return nil, err
+					}
+					if tok4 != keyword("endobj") {
+						fmt.Sprint(b.errorf("missing endobj after indirect object definition"))
+						b.unreadToken(tok4)
+					}
+				}
+				b.objptr = old
+				return objdef{objptr{uint32(t1), uint16(t2)}, obj}, err
+			}
+			b.unreadToken(tok3)
+		}
+		b.unreadToken(tok2)
+	}
+	return tok, nil
+}
+
 func (b *buffer) readArray() object {
 	var x array
 	for {
@@ -491,6 +836,26 @@ func (b *buffer) readArray() object {
 		x = append(x, res)
 	}
 	return x
+}
+
+func (b *buffer) readArrayCtx(ctx context.Context) (object, error) {
+	var x array
+	for {
+		tok, err := b.readTokenCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if tok == nil || tok == keyword("]") {
+			break
+		}
+		b.unreadToken(tok)
+		res, err := b.readObjectCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		x = append(x, res)
+	}
+	return x, nil
 }
 
 func (b *buffer) readDict() object {
@@ -536,6 +901,63 @@ func (b *buffer) readDict() object {
 	}
 
 	return stream{x, b.objptr, b.readOffset()}
+}
+
+func (b *buffer) readDictCtx(ctx context.Context) (object, error) {
+	x := make(dict)
+	for {
+		tok, err := b.readTokenCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if tok == nil || tok == keyword(">>") {
+			break
+		}
+		n, ok := tok.(name)
+		if !ok {
+			fmt.Sprint(b.errorf("unexpected non-name key %T(%v) parsing dictionary", tok, tok))
+			continue
+		}
+		res, err := b.readObjectCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		x[n] = res
+	}
+
+	if !b.allowStream {
+		return x, nil
+	}
+
+	tok, err := b.readTokenCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if tok != keyword("stream") {
+		b.unreadToken(tok)
+		return x, nil
+	}
+
+	c, err := b.readByteCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	switch c {
+	case '\r':
+		c2, err := b.readByteCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if c2 != '\n' {
+			b.unreadByte()
+		}
+	case '\n':
+		// ok
+	default:
+		return nil, errors.New(b.errorf("stream keyword not followed by newline"))
+	}
+
+	return stream{x, b.objptr, b.readOffset()}, nil
 }
 
 func isSpace(b byte) bool {

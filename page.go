@@ -794,7 +794,7 @@ func (p Page) GetTextByRowCtx(ctx context.Context) (Rows, error) {
 	return result, err
 }
 
-func (p Page) walkTextBlocksCtx(ctx context.Context, walker func(enc TextEncoding, x, y float64, s string)) {
+func (p Page) walkTextBlocksCtx(ctx context.Context, walker func(enc TextEncoding, x, y float64, s string)) error {
 	strm := p.V.Key("Contents")
 
 	fonts := make(map[string]*Font)
@@ -806,16 +806,11 @@ func (p Page) walkTextBlocksCtx(ctx context.Context, walker func(enc TextEncodin
 	var enc TextEncoding = &nopEncoder{}
 	var currentX, currentY float64
 
-	// Счетчик операций для периодической проверки контекста
-	operationCount := 0
-
-	InterpretCtx(ctx, strm, func(stk *Stack, op string) {
-		// Проверяем контекст каждые 1000 операций чтобы не тормозить
-		operationCount++
-		if operationCount%1000 == 0 {
-			if err := ctx.Err(); err != nil {
-				panic(err) // Прерываем выполнение
-			}
+	// Используем новую InterpretCtx с поддержкой контекста
+	return InterpretCtx(ctx, strm, func(stk *Stack, op string) {
+		// Проверяем контекст при каждой операции
+		if err := ctx.Err(); err != nil {
+			panic(err)
 		}
 
 		n := stk.Len()
