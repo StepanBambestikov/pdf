@@ -110,21 +110,47 @@ func (b *buffer) errorf(format string, args ...interface{}) string {
 func (b *buffer) reload() (bool, error) {
 	n := cap(b.buf) - int(b.offset%int64(cap(b.buf)))
 	n, err := b.r.Read(b.buf[:n])
+
 	if n == 0 && err != nil {
 		b.buf = b.buf[:0]
 		b.pos = 0
 		if b.allowEOF && err == io.EOF {
 			b.eof = true
-			return false, err
+			return false, nil // ← Убираем возврат ошибки
 		}
-		//fmt.Sprint(b.errorf("malformed PDF: reading at offset %d: %v", b.offset, err))
 		return false, err
 	}
+
 	b.offset += int64(n)
 	b.buf = b.buf[:n]
 	b.pos = 0
+
+	// Обработка EOF после успешного чтения
+	if err == io.EOF {
+		b.eof = true
+	}
+
 	return true, err
 }
+
+//func (b *buffer) reload() (bool, error) {
+//	n := cap(b.buf) - int(b.offset%int64(cap(b.buf)))
+//	n, err := b.r.Read(b.buf[:n])
+//	if n == 0 && err != nil {
+//		b.buf = b.buf[:0]
+//		b.pos = 0
+//		if b.allowEOF && err == io.EOF {
+//			b.eof = true
+//			return false, err
+//		}
+//		//fmt.Sprint(b.errorf("malformed PDF: reading at offset %d: %v", b.offset, err))
+//		return false, err
+//	}
+//	b.offset += int64(n)
+//	b.buf = b.buf[:n]
+//	b.pos = 0
+//	return true, err
+//}
 
 func (b *buffer) seekForward(offset int64) (err error) {
 	for b.offset < offset {
@@ -216,6 +242,29 @@ func (b *buffer) readToken() token {
 
 // Новая версия readToken с поддержкой контекста
 func (b *buffer) readTokenCtx(ctx context.Context) (token, error) {
+
+	//if n := len(b.unread); n > 0 {
+	//	t := b.unread[n-1]
+	//	b.unread = b.unread[:n-1]
+	//	return t
+	//}
+	//
+	//// Find first non-space, non-comment byte.
+	//c := b.readByte()
+	//for {
+	//	if isSpace(c) {
+	//		if b.eof {
+	//			return io.EOF
+	//		}
+	//		c = b.readByte()
+	//	} else if c == '%' {
+	//		for c != '\r' && c != '\n' {
+	//			c = b.readByte()
+	//		}
+	//	} else {
+	//		break
+	//	}
+	//}
 	if n := len(b.unread); n > 0 {
 		t := b.unread[n-1]
 		b.unread = b.unread[:n-1]
