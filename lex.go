@@ -21,7 +21,6 @@ import (
 //	string, a PDF string literal
 //	keyword, a PDF keyword
 //	name, a PDF name without the leading slash
-//
 type token interface{}
 
 // A name is a PDF name, without the leading slash.
@@ -94,7 +93,7 @@ func (b *buffer) reload() (bool, error) {
 			b.eof = true
 			return false, err
 		}
-		fmt.Sprint(b.errorf("malformed PDF: reading at offset %d: %v", b.offset, err))
+		//fmt.Sprint(b.errorf("malformed PDF: reading at offset %d: %v", b.offset, err))
 		return false, err
 	}
 	b.offset += int64(n)
