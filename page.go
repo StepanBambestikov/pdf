@@ -794,6 +794,89 @@ func (p Page) GetTextByRowCtx(ctx context.Context) (Rows, error) {
 	return result, err
 }
 
+func (p Page) walkTextBlocksCtx(ctx context.Context, walker func(enc TextEncoding, x, y float64, s string)) {
+	strm := p.V.Key("Contents")
+
+	fonts := make(map[string]*Font)
+	for _, font := range p.Fonts() {
+		f := p.Font(font)
+		fonts[font] = &f
+	}
+
+	var enc TextEncoding = &nopEncoder{}
+	var currentX, currentY float64
+
+	// Счетчик операций для периодической проверки контекста
+	operationCount := 0
+
+	Interpret(strm, func(stk *Stack, op string) {
+		// Проверяем контекст каждые 1000 операций чтобы не тормозить
+		operationCount++
+		if operationCount%1000 == 0 {
+			if err := ctx.Err(); err != nil {
+				panic(err) // Прерываем выполнение
+			}
+		}
+
+		n := stk.Len()
+		args := make([]Value, n)
+		for i := n - 1; i >= 0; i-- {
+			args[i] = stk.Pop()
+		}
+
+		switch op {
+		default:
+			return
+		case "T*": // move to start of next line
+		case "Tf": // set text font and size
+			if len(args) != 2 {
+				panic("bad TL")
+			}
+
+			if font, ok := fonts[args[0].Name()]; ok {
+				enc = font.Encoder()
+			} else {
+				enc = &nopEncoder{}
+			}
+		case "\"": // set spacing, move to next line, and show text
+			if len(args) != 3 {
+				panic("bad \" operator")
+			}
+			fallthrough
+		case "'": // move to next line and show text
+			if len(args) != 1 {
+				panic("bad ' operator")
+			}
+			fallthrough
+		case "Tj": // show text
+			if len(args) != 1 {
+				panic("bad Tj operator")
+			}
+
+			walker(enc, currentX, currentY, args[0].RawString())
+		case "TJ": // show text, allowing individual glyph positioning
+			v := args[0]
+			for i := 0; i < v.Len(); i++ {
+				// Дополнительная проверка в потенциально длинных циклах
+				if i%100 == 0 {
+					if err := ctx.Err(); err != nil {
+						panic(err)
+					}
+				}
+				x := v.Index(i)
+				if x.Kind() == String {
+					walker(enc, currentX, currentY, x.RawString())
+				}
+			}
+		case "Td":
+			walker(enc, currentX, currentY, "")
+		case "Tm":
+			currentX = args[4].Float64()
+			currentY = args[5].Float64()
+		}
+	})
+}
+
 func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s string)) {
 	strm := p.V.Key("Contents")
 
