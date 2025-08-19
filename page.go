@@ -761,7 +761,7 @@ func (p Page) GetTextByRowCtx(ctx context.Context) (Rows, error) {
 	}
 
 	// сам обход текста
-	p.walkTextBlocks(showText)
+	p.walkTextBlocksCtx(ctx, showText)
 
 	// перед сортировками — ещё одна проверка
 	if err := ctx.Err(); err != nil {
